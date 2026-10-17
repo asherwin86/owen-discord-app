@@ -5,6 +5,26 @@ const fs = require('fs');
 const { autoUpdater } = require('electron-updater');
 const { startServer } = require('../server');
 
+// Where the app keeps its data (accounts, messages, certificate, logs, caches).
+// A pointer file in the default folder can move it, e.g. to another drive:
+//   %APPDATA%\LanChat Host\location.json  ->  { "userData": "E:\\LanChat Data" }
+// Must run before anything touches userData (single-instance lock, server, ...).
+{
+  const pointer = path.join(app.getPath('appData'), 'LanChat Host', 'location.json');
+  let target = null;
+  try { target = JSON.parse(fs.readFileSync(pointer, 'utf8')).userData; } catch { /* no pointer: use default */ }
+  if (target) {
+    if (!fs.existsSync(path.parse(target).root)) {
+      // Don't silently start with an empty database when the drive is unplugged.
+      require('electron').dialog.showErrorBox('LanChat Host', `The data folder is on a drive that isn't available:\n${target}\n\nConnect it and start the app again.`);
+      app.exit(1);
+    } else {
+      fs.mkdirSync(target, { recursive: true });
+      app.setPath('userData', target);
+    }
+  }
+}
+
 const PORT = 3000;
 const startHidden = process.argv.includes('--hidden');
 

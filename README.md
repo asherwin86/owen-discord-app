@@ -54,4 +54,10 @@ To test an update without GitHub, serve the `dist` folder over http and start th
 
 ## Where data lives
 
-Installed app: `%APPDATA%\LanChat Host\data\data.json`. Back that file up to keep accounts and history.
+By default the installed app keeps everything in `%APPDATA%\LanChat Host` (accounts and history are in `data\data.json`). To move it to another drive, copy that folder there and create `%APPDATA%\LanChat Host\location.json`:
+
+```json
+{ "userData": "E:\\LanChat Data" }
+```
+
+On this PC the data lives in `E:\LanChat Data`. If that drive isn't connected the app shows an error and quits rather than starting with an empty database. Back up `data\data.json` to keep accounts and history.
