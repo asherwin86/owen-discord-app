@@ -6,6 +6,7 @@ const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
+const QRCode = require('qrcode');
 const { Store } = require('./store');
 const { ensureCert } = require('./cert');
 
@@ -52,7 +53,14 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
 
   // ---------- helpers ----------
   let securePort = null;
-  app.get('/api/info', (req, res) => res.json({ httpsPort: securePort }));
+  app.get('/api/info', (req, res) => res.json({ httpsPort: securePort, hosts: lanAddresses() }));
+
+  // QR code (SVG) for a link, used to hop onto a voice channel from a phone
+  app.get('/api/qr', async (req, res) => {
+    const text = String(req.query.text || '');
+    if (!/^https?:\/\/[^\s]{1,500}$/.test(text)) return res.status(400).end();
+    res.type('image/svg+xml').send(await QRCode.toString(text, { type: 'svg', margin: 1, width: 240, errorCorrectionLevel: 'M' }));
+  });
 
   const online = new Map(); // userId -> socket count
   // voice: channelId -> Map(userId -> socketId); one voice connection per user
@@ -112,8 +120,8 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
     }
     if (type === 'chan') {
       const s = db.servers[a];
-      // voice channels have no text chat
-      if (!s || !s.members.includes(uid) || !s.channels.some((c) => c.id === b && c.type !== 'voice')) return null;
+      // text and voice channels both have a chat
+      if (!s || !s.members.includes(uid) || !s.channels.some((c) => c.id === b)) return null;
       return { key: `chan:${a}:${b}`, members: s.members };
     }
     return null;

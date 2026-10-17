@@ -9,6 +9,8 @@ A simple Discord-style chat that runs from a Windows app and is used from any br
 - **Voice channels** - every new server gets a "Lounge" voice channel; owners can add more. Click one to join, with mute, leave and a speaking highlight. Audio goes peer-to-peer (WebRTC) between browsers, up to 8 people per channel.
 - Realtime messages, unread badges, works on phones (mobile layout).
 
+- **QR code** - in a voice channel press **QR** to show a code. Scan it with a phone on the same Wi-Fi: it opens the secure link, you enter a name, and you land in that voice channel (tap **Join voice**). Voice channels also have a normal text chat. The code carries the server's invite code, so anyone who scans it can join the server.
+
 ## Voice needs HTTPS
 
 Browsers only allow microphone access on secure pages: `https://...` or `http://localhost`. So the host also serves HTTPS (port 3443) with a self-signed certificate. On other devices use the "secure link" shown in the host window, e.g. `https://192.168.0.114:3443`. Your browser warns about the certificate once: choose **Advanced**, then **Continue**. Allow the microphone when asked. Voice drops if the browser tab is backgrounded or the phone screen locks.

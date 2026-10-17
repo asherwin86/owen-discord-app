@@ -1,7 +1,7 @@
 {
   "name": "lanchat",
   "productName": "LanChat Host",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Self-hosted chat (friends, groups, servers) served from a Windows app to your local network.",
   "main": "electron/main.js",
   "author": "LanChat",
@@ -17,6 +17,7 @@
   "dependencies": {
     "electron-updater": "^6.3.9",
     "express": "^4.21.2",
+    "qrcode": "^1.5.4",
     "selfsigned": "^2.4.1",
     "socket.io": "^4.8.1"
   },

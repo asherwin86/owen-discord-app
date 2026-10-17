@@ -243,7 +243,7 @@ function openChat(key) {
   delete unread[key]; updateTitle();
   document.body.classList.remove('show-nav');
   const info = chatInfo(key);
-  if (!msgs[key] && !(info && info.kind === 'voice')) loadMessages(key);
+  if (!msgs[key]) loadMessages(key);
   renderApp();
   const input = document.getElementById('composer');
   if (input && matchMedia('(min-width: 761px)').matches) input.focus();
@@ -318,8 +318,8 @@ function renderSide() {
         ...s.channels.filter((c) => c.type === 'voice').flatMap((c) => {
           const key = `chan:${s.id}:${c.id}`;
           return [
-            el('button', { class: 'row' + (ui.chat === key ? ' on' : ''), onclick: () => { openChat(key); joinVoice(s, c); } },
-              el('span', { class: 'name' }, '\u{1F50A} ' + c.name)),
+            el('button', { class: 'row' + (ui.chat === key ? ' on' : '') + (unread[key] ? ' unread' : ''), onclick: () => { openChat(key); joinVoice(s, c); } },
+              el('span', { class: 'name' }, '\u{1F50A} ' + c.name), unreadBadge(key)),
             ...(s.voice[c.id] || []).map((u) => el('div', { class: 'vuser', 'data-uid': u.id }, el('div', { class: 'avatar sm' }, initial(u.username)), u.username)),
           ];
         })),
@@ -363,7 +363,7 @@ function channelModal(s, kind = 'text') {
 
 // "voice connected" strip shown above the user panel while in a call
 function voiceBar() {
-  if (!voice.channelId) return null;
+  if (!voice.channelId) return document.createDocumentFragment();   // nothing (null would render as the text "null")
   const s = S.servers.find((x) => x.id === voice.serverId);
   const c = s && s.channels.find((x) => x.id === voice.channelId);
   return el('div', { class: 'voice-bar' },
@@ -378,7 +378,6 @@ function renderMain() {
   const menu = el('button', { class: 'icon-btn menu-btn', onclick: () => document.body.classList.add('show-nav') }, '☰');
   const info = chatInfo(ui.chat);
   if (!info) { renderFriends(main, menu); return; }
-  if (info.kind === 'voice') { renderVoice(main, menu, info); return; }
 
   // keep a half-typed message when a background refresh re-renders the pane
   const old = document.getElementById('composer');
@@ -400,9 +399,12 @@ function renderMain() {
   input.addEventListener('input', () => { input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; });
 
   const canMembers = info.kind !== 'dm';
+  const isVoice = info.kind === 'voice';
   main.replaceChildren(
     el('div', { class: 'main-head' }, menu, el('div', { class: 'grow' }, info.title),
+      isVoice ? el('button', { class: 'btn grey small', title: 'Show a QR code to join from a phone', onclick: () => qrModal(info.server, info.channel) }, '\u{1F4F1} QR') : null,
       canMembers ? el('button', { class: 'btn grey small', onclick: () => membersModal(info) }, 'Members') : null),
+    isVoice ? voiceSection(info) : document.createDocumentFragment(),
     list,
     el('div', { class: 'composer' }, input));
   paintMessages(list, msgs[ui.chat]);
@@ -491,9 +493,9 @@ const voice = {
   serverId: null, channelId: null, stream: null, muted: false,
   peers: new Map(),       // userId -> { pc, audio, queued: [] }
   analysers: new Map(),   // userId -> { analyser, buf }
-  ctx: null, timer: null, httpsPort: null, error: '',
+  ctx: null, timer: null, httpsPort: null, hosts: [], error: '',
 };
-fetch('/api/info').then((r) => r.json()).then((i) => { voice.httpsPort = i.httpsPort; }).catch(() => {});
+fetch('/api/info').then((r) => r.json()).then((i) => { voice.httpsPort = i.httpsPort; voice.hosts = i.hosts || []; }).catch(() => {});
 
 const canUseMic = () => window.isSecureContext && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 
@@ -619,31 +621,76 @@ function watchLevel(uid, stream) {
   voice.analysers.set(uid, { analyser, buf: new Uint8Array(analyser.fftSize) });
 }
 
-function renderVoice(main, menu, info) {
+// the call controls shown above a voice channel's text chat
+function voiceSection(info) {
   const { server: s, channel: c } = info;
   const here = voice.channelId === c.id;
   const users = s.voice[c.id] || [];
-  let body;
   if (!canUseMic()) {
     const secure = voice.httpsPort ? `https://${location.hostname}:${voice.httpsPort}` : null;
-    body = el('div', { class: 'empty' },
-      el('p', {}, 'Browsers only allow the microphone on secure pages, and this address is plain http.'),
-      secure ? el('p', {}, 'Open ', el('a', { href: secure, style: 'color:#00a8fc' }, secure),
+    return el('div', { class: 'vsection' },
+      el('div', {}, 'Browsers only allow the microphone on secure pages, and this address is plain http.'),
+      secure ? el('div', {}, 'Open ', el('a', { href: secure, style: 'color:#00a8fc' }, secure),
         ' instead. Your browser will warn about the certificate once: choose Advanced, then Continue.')
-        : el('p', {}, 'HTTPS is not available on this host.'));
-  } else {
-    body = el('div', { class: 'panel' },
-      voice.error ? el('div', { class: 'error' }, voice.error) : null,
-      el('div', { class: 'vgrid' }, ...users.map((u) => el('div', { class: 'vtile', 'data-uid': u.id },
-        el('div', { class: 'avatar big' }, initial(u.username)), el('div', {}, u.username)))),
-      !users.length ? el('div', { class: 'empty' }, 'Nobody is in this channel yet.') : null,
-      el('div', { class: 'vactions' },
-        here
-          ? [el('button', { class: 'btn grey', onclick: toggleMute }, voice.muted ? '\u{1F507} Unmute' : '\u{1F3A4} Mute'),
-             el('button', { class: 'btn red', onclick: leaveVoice }, 'Leave voice')]
-          : el('button', { class: 'btn', onclick: () => joinVoice(s, c) }, 'Join voice')));
+        : el('div', {}, 'HTTPS is not available on this host.'));
   }
-  main.replaceChildren(el('div', { class: 'main-head' }, menu, el('div', { class: 'grow' }, info.title)), body);
+  return el('div', { class: 'vsection' },
+    voice.error ? el('div', { class: 'error' }, voice.error) : null,
+    el('div', { class: 'vgrid' },
+      ...users.map((u) => el('div', { class: 'vtile', 'data-uid': u.id }, el('div', { class: 'avatar' }, initial(u.username)), el('div', { class: 'vname' }, u.username))),
+      !users.length ? el('div', { class: 'sub' }, 'Nobody is in this voice channel yet.') : null),
+    el('div', { class: 'vactions' },
+      here
+        ? [el('button', { class: 'btn grey small', onclick: toggleMute }, voice.muted ? '\u{1F507} Unmute' : '\u{1F3A4} Mute'),
+           el('button', { class: 'btn red small', onclick: leaveVoice }, 'Leave voice')]
+        : el('button', { class: 'btn small', onclick: () => joinVoice(s, c) }, 'Join voice')));
+}
+
+// ---------- QR code: scan with a phone to land on this voice channel ----------
+function connectUrl(s, c, host) {
+  const port = location.protocol === 'https:' ? location.port : voice.httpsPort;
+  return `https://${host}${port ? ':' + port : ''}/#voice=${s.inviteCode}:${c.id}`;
+}
+
+function qrModal(s, c) {
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  const hosts = local || !voice.hosts.includes(location.hostname) ? voice.hosts : [location.hostname, ...voice.hosts.filter((h) => h !== location.hostname)];
+  if (!hosts.length) hosts.push(location.hostname);
+  const img = el('img', { alt: 'QR code', width: 240, height: 240, style: 'background:#fff;border-radius:8px;align-self:center' });
+  const link = el('div', { class: 'code' });
+  const pick = el('select', { onchange: () => paint(pick.value) }, ...hosts.map((h) => el('option', { value: h }, h)));
+  function paint(host) {
+    const url = connectUrl(s, c, host);
+    img.src = '/api/qr?text=' + encodeURIComponent(url);
+    link.textContent = url;
+  }
+  paint(hosts[0]);
+  modal('Join ' + c.name + ' from a phone', [
+    el('div', { class: 'sub', style: 'white-space:normal' }, 'Scan with your phone camera (on the same Wi-Fi). It opens this voice channel; accept the certificate warning once, enter a name, then tap Join voice.'),
+    img,
+    hosts.length > 1 ? el('div', {}, el('label', {}, 'Host address (pick the one on your Wi-Fi)'), pick) : null,
+    link,
+    el('div', { class: 'sub', style: 'white-space:normal' }, 'The code includes the server invite, so anyone who scans it can join the server.'),
+  ]);
+}
+
+// "#voice=<inviteCode>:<channelId>" from a scanned QR code
+let pendingVoice = null;
+{
+  const m = /^#voice=([0-9a-f]+):([0-9a-f]+)$/.exec(location.hash);
+  if (m) { pendingVoice = { code: m[1], channelId: m[2] }; history.replaceState(null, '', location.pathname); }
+}
+async function openPendingVoice() {
+  if (!pendingVoice) return;
+  const { code, channelId } = pendingVoice;
+  pendingVoice = null;
+  try {
+    const r = await api('POST', '/api/servers/join', { code });
+    ui.serverId = r.id;
+    await refresh();
+    const s = S.servers.find((x) => x.id === r.id);
+    if (s && s.channels.some((c) => c.id === channelId)) openChat(`chan:${s.id}:${channelId}`);
+  } catch (e) { alert('Could not open that voice channel: ' + e.message); }
 }
 
 // ---------- boot ----------
@@ -651,6 +698,7 @@ async function start() {
   try {
     await refresh();
     if (!socket) connect();
+    openPendingVoice();
   } catch { renderAuth(); }
 }
 

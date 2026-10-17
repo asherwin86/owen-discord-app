@@ -74,7 +74,15 @@ const { startServer } = require('../server');
   // voice channels: no text, membership enforced, signalling relayed, occupancy tracked
   const lounge = (await call('GET', '/api/me', a)).body.servers[0].channels.find((c) => c.type === 'voice');
   assert(lounge, 'new servers get a voice channel');
-  ok(await call('POST', '/api/messages', b, { chat: `chan:${s}:${lounge.id}`, text: 'x' }), 404);
+  // voice channels have a text chat too (members only)
+  ok(await call('POST', '/api/messages', b, { chat: `chan:${s}:${lounge.id}`, text: 'chat in voice' }));
+  ok(await call('POST', '/api/messages', c, { chat: `chan:${s}:${lounge.id}`, text: 'x' }), 404);
+  assert.strictEqual((await call('GET', `/api/messages?chat=chan:${s}:${lounge.id}`, a)).body.length, 1);
+  // QR endpoint only encodes http(s) links
+  const qr = await fetch(base + '/api/qr?text=' + encodeURIComponent('https://192.168.0.2:3443/#voice=abc:def'));
+  assert.strictEqual(qr.status, 200);
+  assert((await qr.text()).startsWith('<svg'));
+  assert.strictEqual((await fetch(base + '/api/qr?text=javascript:alert(1)')).status, 400);
   const sockA = io(base, { auth: { token: a } });
   await new Promise((r) => sockA.on('connect', r));
   const ack = (sock, ev, data) => new Promise((r) => sock.emit(ev, data, r));
