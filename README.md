@@ -6,7 +6,12 @@ A simple Discord-style chat that runs from a Windows app and is used from any br
 - **Friends** - send/accept requests, see who is online, direct message.
 - **Groups** - group chats made from your friends.
 - **Servers** - create a server with channels, share the invite code, others join with it.
+- **Voice channels** - every new server gets a "Lounge" voice channel; owners can add more. Click one to join, with mute, leave and a speaking highlight. Audio goes peer-to-peer (WebRTC) between browsers, up to 8 people per channel.
 - Realtime messages, unread badges, works on phones (mobile layout).
+
+## Voice needs HTTPS
+
+Browsers only allow microphone access on secure pages: `https://...` or `http://localhost`. So the host also serves HTTPS (port 3443) with a self-signed certificate. On other devices use the "secure link" shown in the host window, e.g. `https://192.168.0.114:3443`. Your browser warns about the certificate once: choose **Advanced**, then **Continue**. Allow the microphone when asked. Voice drops if the browser tab is backgrounded or the phone screen locks.
 
 ## Run it (development)
 
@@ -35,12 +40,15 @@ It checks on startup and every 4 hours, downloads in the background, and install
 
 To ship an update:
 
-1. Bump `version` in `package.json` (e.g. `1.0.1`).
+1. Bump `version` in `package.json` (e.g. `1.1.1`).
 2. Create a GitHub token with `repo` scope and set it: `$env:GH_TOKEN = "<token>"`
-3. Run `npm run release` - this builds and uploads the installer as a draft GitHub release.
-4. Publish that draft release on GitHub. Running hosts pick it up automatically.
+3. Run `npm run release` - this builds and publishes a GitHub release with the installer and `latest.yml`.
+   (No token? Run `npm run dist`, then on GitHub create a release tagged `v<version>` and upload `dist/LanChat-Host-Setup-<version>.exe`, its `.blockmap`, and `dist/latest.yml`.)
+4. Running hosts pick it up automatically (within 4 hours, or via "Check now").
 
-Auto-update only works in the installed app (not `npm start`), and the repo must be public (or the app given a token) for the updater to read releases.
+Auto-update only works in the installed app (not `npm start`), and the repo must be public (or the app given a token) for the updater to read releases. Update activity is logged to `%APPDATA%\LanChat Host\updater.log`.
+
+To test an update without GitHub, serve the `dist` folder over http and start the app with `LANCHAT_UPDATE_URL=http://localhost:8099` set.
 
 ## Where data lives
 

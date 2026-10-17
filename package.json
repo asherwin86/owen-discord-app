@@ -1,7 +1,7 @@
 {
   "name": "lanchat",
   "productName": "LanChat Host",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Self-hosted chat (friends, groups, servers) served from a Windows app to your local network.",
   "main": "electron/main.js",
   "author": "LanChat",
@@ -17,6 +17,7 @@
   "dependencies": {
     "electron-updater": "^6.3.9",
     "express": "^4.21.2",
+    "selfsigned": "^2.4.1",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
@@ -27,7 +28,9 @@
   "build": {
     "appId": "com.lanchat.host",
     "productName": "LanChat Host",
-    "directories": { "output": "dist" },
+    "directories": {
+      "output": "dist"
+    },
     "files": [
       "electron/**/*",
       "server/**/*",
@@ -42,13 +45,15 @@
     "nsis": {
       "oneClick": true,
       "perMachine": false,
-      "runAfterFinish": true
+      "runAfterFinish": true,
+      "artifactName": "LanChat-Host-Setup-${version}.${ext}"
     },
     "publish": [
       {
         "provider": "github",
         "owner": "asherwin86",
-        "repo": "owen-discord-app"
+        "repo": "owen-discord-app",
+        "releaseType": "release"
       }
     ]
   }

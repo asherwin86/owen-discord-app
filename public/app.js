@@ -55,14 +55,19 @@ function chatInfo(key) {
   if (t === 'chan') {
     const s = S.servers.find((x) => x.id === a);
     const c = s && s.channels.find((x) => x.id === b);
-    return c && { title: '# ' + c.name, kind: 'chan', server: s };
+    if (!c) return null;
+    return c.type === 'voice'
+      ? { title: '\u{1F50A} ' + c.name, kind: 'voice', server: s, channel: c }
+      : { title: '# ' + c.name, kind: 'chan', server: s, channel: c };
   }
   return null;
 }
+const firstText = (s) => s.channels.find((c) => c.type !== 'voice') || s.channels[0];
 const serverUnread = (s) => s.channels.reduce((n, c) => n + (unread['chan:' + s.id + ':' + c.id] || 0), 0);
 
 // ---------- session ----------
 function signOut(callServer = true) {
+  leaveVoice();
   if (callServer && token) api('POST', '/api/logout').catch(() => {});
   token = null; store.set('token', null);
   if (socket) { socket.disconnect(); socket = null; }
@@ -76,9 +81,11 @@ async function refresh() {
   if (ui.chat && !chatInfo(ui.chat)) ui.chat = null;
   if (ui.serverId && !ui.chat) {
     const s = S.servers.find((x) => x.id === ui.serverId);
-    ui.chat = 'chan:' + s.id + ':' + s.channels[0].id;
+    ui.chat = 'chan:' + s.id + ':' + firstText(s).id;
     loadMessages(ui.chat);
   }
+  // our voice channel was deleted / we left that server
+  if (voice.channelId && !S.servers.some((s) => s.channels.some((c) => c.id === voice.channelId))) cleanupVoice();
   renderApp();
 }
 
@@ -100,6 +107,10 @@ function connect() {
     else if (m.userId !== S.me.id) { unread[key] = (unread[key] || 0) + 1; updateTitle(); renderApp(true); }
   });
   socket.on('connect_error', (e) => { if (e.message === 'unauthorized') signOut(false); });
+  socket.on('disconnect', () => cleanupVoice());   // the server drops us from voice too
+  socket.on('voice:kicked', () => cleanupVoice());
+  socket.on('voice:signal', onVoiceSignal);
+  socket.on('voice:peer-left', ({ userId }) => closePeer(userId));
 }
 
 function updateTitle() {
@@ -231,7 +242,8 @@ function openChat(key) {
   ui.chat = key;
   delete unread[key]; updateTitle();
   document.body.classList.remove('show-nav');
-  if (!msgs[key]) loadMessages(key);
+  const info = chatInfo(key);
+  if (!msgs[key] && !(info && info.kind === 'voice')) loadMessages(key);
   renderApp();
   const input = document.getElementById('composer');
   if (input && matchMedia('(min-width: 761px)').matches) input.focus();
@@ -239,7 +251,7 @@ function openChat(key) {
 function openHome() { ui.serverId = null; ui.chat = null; document.body.classList.add('show-nav'); renderApp(); }
 function openServer(s) {
   ui.serverId = s.id;
-  const key = 'chan:' + s.id + ':' + s.channels[0].id;
+  const key = 'chan:' + s.id + ':' + firstText(s).id;
   openChat(key);
   document.body.classList.add('show-nav');
 }
@@ -297,11 +309,21 @@ function renderSide() {
         el('span', {}, s.name), el('span', {}, '⌄')),
       el('div', { class: 'side-body' },
         el('h4', {}, 'Text channels', mine ? el('button', { class: 'icon-btn', title: 'Add channel', onclick: () => channelModal(s) }, '+') : null),
-        ...s.channels.map((c) => {
+        ...s.channels.filter((c) => c.type !== 'voice').map((c) => {
           const key = `chan:${s.id}:${c.id}`;
           return el('button', { class: 'row' + (ui.chat === key ? ' on' : '') + (unread[key] ? ' unread' : ''), onclick: () => openChat(key) },
             el('span', { class: 'name' }, '# ' + c.name), unreadBadge(key));
+        }),
+        el('h4', {}, 'Voice channels', mine ? el('button', { class: 'icon-btn', title: 'Add channel', onclick: () => channelModal(s, 'voice') }, '+') : null),
+        ...s.channels.filter((c) => c.type === 'voice').flatMap((c) => {
+          const key = `chan:${s.id}:${c.id}`;
+          return [
+            el('button', { class: 'row' + (ui.chat === key ? ' on' : ''), onclick: () => { openChat(key); joinVoice(s, c); } },
+              el('span', { class: 'name' }, '\u{1F50A} ' + c.name)),
+            ...(s.voice[c.id] || []).map((u) => el('div', { class: 'vuser', 'data-uid': u.id }, el('div', { class: 'avatar sm' }, initial(u.username)), u.username)),
+          ];
         })),
+      voiceBar(),
       me);
     return;
   }
@@ -324,14 +346,30 @@ function renderSide() {
         return el('button', { class: 'row' + (ui.chat === key ? ' on' : '') + (unread[key] ? ' unread' : ''), onclick: () => openChat(key) },
           el('div', { class: 'avatar sm' }, initial(g.name)), el('span', { class: 'name' }, g.name), unreadBadge(key));
       })),
+    voiceBar(),
     me);
 }
 
-function channelModal(s) {
+function channelModal(s, kind = 'text') {
   const name = el('input', { type: 'text', maxlength: 24, placeholder: 'new-channel' });
-  modal('Create channel', [el('label', {}, 'Channel name'), name], [
-    { label: 'Create', run: () => api('POST', `/api/servers/${s.id}/channels`, { name: name.value }) },
+  const radio = (value, label) => el('label', { class: 'check' }, el('input', { type: 'radio', name: 'ctype', value, checked: value === kind }), label);
+  const box = el('div', {}, radio('text', '# Text channel'), radio('voice', '\u{1F50A} Voice channel'));
+  modal('Create channel', [box, el('label', {}, 'Channel name'), name], [
+    { label: 'Create', run: () => api('POST', `/api/servers/${s.id}/channels`, {
+      name: name.value, type: box.querySelector('input:checked').value,
+    }) },
   ]);
+}
+
+// "voice connected" strip shown above the user panel while in a call
+function voiceBar() {
+  if (!voice.channelId) return null;
+  const s = S.servers.find((x) => x.id === voice.serverId);
+  const c = s && s.channels.find((x) => x.id === voice.channelId);
+  return el('div', { class: 'voice-bar' },
+    el('div', { class: 'grow' }, el('div', { class: 'vb-title' }, '\u{1F7E2} Voice connected'), el('div', { class: 'sub' }, c ? `${c.name} / ${s.name}` : '')),
+    el('button', { class: 'btn grey small', title: voice.muted ? 'Unmute' : 'Mute', onclick: toggleMute }, voice.muted ? '\u{1F507}' : '\u{1F3A4}'),
+    el('button', { class: 'btn red small', onclick: leaveVoice }, 'Leave'));
 }
 
 // ---------- main pane ----------
@@ -340,6 +378,7 @@ function renderMain() {
   const menu = el('button', { class: 'icon-btn menu-btn', onclick: () => document.body.classList.add('show-nav') }, '☰');
   const info = chatInfo(ui.chat);
   if (!info) { renderFriends(main, menu); return; }
+  if (info.kind === 'voice') { renderVoice(main, menu, info); return; }
 
   // keep a half-typed message when a background refresh re-renders the pane
   const old = document.getElementById('composer');
@@ -445,6 +484,166 @@ function frow(user, sub, ...actions) {
     el('div', { class: 'avatar' }, initial(user.username), el('span', { class: 'dot' + (user.online ? ' on' : '') })),
     el('div', { class: 'grow' }, el('div', {}, user.username), el('div', { class: 'sub' }, sub)),
     ...actions);
+}
+
+// ---------- voice (WebRTC mesh; the server only relays signalling) ----------
+const voice = {
+  serverId: null, channelId: null, stream: null, muted: false,
+  peers: new Map(),       // userId -> { pc, audio, queued: [] }
+  analysers: new Map(),   // userId -> { analyser, buf }
+  ctx: null, timer: null, httpsPort: null, error: '',
+};
+fetch('/api/info').then((r) => r.json()).then((i) => { voice.httpsPort = i.httpsPort; }).catch(() => {});
+
+const canUseMic = () => window.isSecureContext && !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+async function joinVoice(s, c) {
+  if (voice.channelId === c.id) return;
+  if (!canUseMic()) { renderMain(); return; }   // the panel explains how to get HTTPS
+  voice.error = '';
+  if (voice.channelId) leaveVoice();
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+  } catch (e) {
+    voice.error = 'Could not use the microphone (' + (e.name === 'NotAllowedError' ? 'permission denied' : e.message) + '). Allow it in the browser and try again.';
+    renderMain(); return;
+  }
+  const r = await new Promise((res) => socket.emit('voice:join', { serverId: s.id, channelId: c.id }, res));
+  if (r.error) {
+    stream.getTracks().forEach((t) => t.stop());
+    voice.error = r.error; renderMain(); return;
+  }
+  voice.serverId = s.id; voice.channelId = c.id; voice.stream = stream; voice.muted = false;
+  startLevels();
+  watchLevel(S.me.id, stream);
+  for (const p of r.peers) await callPeer(p.id);   // the newcomer makes the offers
+  renderApp(true); if (ui.chat) renderMain();
+}
+
+function leaveVoice() {
+  if (!voice.channelId) return;
+  if (socket) socket.emit('voice:leave');
+  cleanupVoice();
+}
+
+function cleanupVoice() {
+  const was = voice.channelId;
+  for (const uid of [...voice.peers.keys()]) closePeer(uid);
+  if (voice.stream) voice.stream.getTracks().forEach((t) => t.stop());
+  clearInterval(voice.timer); voice.timer = null;
+  if (voice.ctx) { voice.ctx.close().catch(() => {}); voice.ctx = null; }
+  voice.analysers.clear();
+  voice.serverId = voice.channelId = voice.stream = null;
+  if (was && S) { renderApp(true); if (ui.chat) renderMain(); }
+}
+
+function toggleMute() {
+  voice.muted = !voice.muted;
+  if (voice.stream) voice.stream.getAudioTracks().forEach((t) => { t.enabled = !voice.muted; });
+  renderApp(true); if (ui.chat) renderMain();
+}
+
+function makePeer(uid) {
+  const pc = new RTCPeerConnection({ iceServers: [] });   // LAN only: host candidates are enough
+  const peer = { pc, audio: null, queued: [] };
+  voice.peers.set(uid, peer);
+  voice.stream.getTracks().forEach((t) => pc.addTrack(t, voice.stream));
+  pc.onicecandidate = (e) => { if (e.candidate) socket.emit('voice:signal', { to: uid, data: { candidate: e.candidate } }); };
+  pc.ontrack = (e) => {
+    if (peer.audio) return;
+    peer.audio = el('audio', { autoplay: true });
+    peer.audio.srcObject = e.streams[0];
+    document.body.append(peer.audio);
+    peer.audio.play().catch(() => {});
+    watchLevel(uid, e.streams[0]);
+  };
+  pc.onconnectionstatechange = () => { if (pc.connectionState === 'failed') closePeer(uid); };
+  return peer;
+}
+
+async function callPeer(uid) {
+  const { pc } = makePeer(uid);
+  await pc.setLocalDescription(await pc.createOffer());
+  socket.emit('voice:signal', { to: uid, data: { sdp: pc.localDescription } });
+}
+
+async function onVoiceSignal({ from, data }) {
+  if (!voice.channelId || !voice.stream) return;
+  const peer = voice.peers.get(from) || makePeer(from);
+  const { pc } = peer;
+  try {
+    if (data.sdp) {
+      await pc.setRemoteDescription(data.sdp);
+      for (const c of peer.queued.splice(0)) await pc.addIceCandidate(c);
+      if (data.sdp.type === 'offer') {
+        await pc.setLocalDescription(await pc.createAnswer());
+        socket.emit('voice:signal', { to: from, data: { sdp: pc.localDescription } });
+      }
+    } else if (data.candidate) {
+      if (pc.remoteDescription) await pc.addIceCandidate(data.candidate);
+      else peer.queued.push(data.candidate);   // candidate beat the offer
+    }
+  } catch (e) { console.warn('voice signal failed', e); }
+}
+
+function closePeer(uid) {
+  const p = voice.peers.get(uid);
+  if (!p) return;
+  voice.peers.delete(uid);
+  voice.analysers.delete(uid);
+  p.pc.close();
+  if (p.audio) { p.audio.srcObject = null; p.audio.remove(); }
+}
+
+// speaking indicator: poll each stream's loudness and toggle a CSS class
+function startLevels() {
+  if (voice.ctx) return;
+  voice.ctx = new (window.AudioContext || window.webkitAudioContext)();
+  voice.timer = setInterval(() => {
+    const speaking = new Set();
+    for (const [uid, a] of voice.analysers) {
+      a.analyser.getByteTimeDomainData(a.buf);
+      let peak = 0;
+      for (const v of a.buf) peak = Math.max(peak, Math.abs(v - 128));
+      if (peak > 6 && !(uid === S.me.id && voice.muted)) speaking.add(uid);
+    }
+    for (const n of document.querySelectorAll('[data-uid]')) n.classList.toggle('speaking', speaking.has(n.dataset.uid));
+  }, 120);
+}
+function watchLevel(uid, stream) {
+  if (!voice.ctx) return;
+  const analyser = voice.ctx.createAnalyser();
+  analyser.fftSize = 512;
+  voice.ctx.createMediaStreamSource(stream).connect(analyser);
+  voice.analysers.set(uid, { analyser, buf: new Uint8Array(analyser.fftSize) });
+}
+
+function renderVoice(main, menu, info) {
+  const { server: s, channel: c } = info;
+  const here = voice.channelId === c.id;
+  const users = s.voice[c.id] || [];
+  let body;
+  if (!canUseMic()) {
+    const secure = voice.httpsPort ? `https://${location.hostname}:${voice.httpsPort}` : null;
+    body = el('div', { class: 'empty' },
+      el('p', {}, 'Browsers only allow the microphone on secure pages, and this address is plain http.'),
+      secure ? el('p', {}, 'Open ', el('a', { href: secure, style: 'color:#00a8fc' }, secure),
+        ' instead. Your browser will warn about the certificate once: choose Advanced, then Continue.')
+        : el('p', {}, 'HTTPS is not available on this host.'));
+  } else {
+    body = el('div', { class: 'panel' },
+      voice.error ? el('div', { class: 'error' }, voice.error) : null,
+      el('div', { class: 'vgrid' }, ...users.map((u) => el('div', { class: 'vtile', 'data-uid': u.id },
+        el('div', { class: 'avatar big' }, initial(u.username)), el('div', {}, u.username)))),
+      !users.length ? el('div', { class: 'empty' }, 'Nobody is in this channel yet.') : null,
+      el('div', { class: 'vactions' },
+        here
+          ? [el('button', { class: 'btn grey', onclick: toggleMute }, voice.muted ? '\u{1F507} Unmute' : '\u{1F3A4} Mute'),
+             el('button', { class: 'btn red', onclick: leaveVoice }, 'Leave voice')]
+          : el('button', { class: 'btn', onclick: () => joinVoice(s, c) }, 'Join voice')));
+  }
+  main.replaceChildren(el('div', { class: 'main-head' }, menu, el('div', { class: 'grow' }, info.title)), body);
 }
 
 // ---------- boot ----------

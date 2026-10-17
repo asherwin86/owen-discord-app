@@ -1,6 +1,7 @@
 'use strict';
 const { app, BrowserWindow, Tray, Menu, ipcMain, shell, nativeImage, clipboard } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { autoUpdater } = require('electron-updater');
 const { startServer } = require('../server');
 
@@ -22,6 +23,7 @@ function hostInfo() {
     version: app.getVersion(),
     port: chat ? chat.port : null,
     urls: chat ? chat.urls() : [],
+    secureUrls: chat ? chat.secureUrls() : [],
     local: chat ? chat.localUrl : null,
     stats: chat ? chat.stats() : { users: 0, online: 0 },
     autoLaunch: app.getLoginItemSettings().openAtLogin,
@@ -30,8 +32,13 @@ function hostInfo() {
   };
 }
 
+function logUpdate(line) {
+  try { fs.appendFileSync(path.join(app.getPath('userData'), 'updater.log'), `${new Date().toISOString()} ${line}\n`); } catch { /* ignore */ }
+}
+
 function setUpdate(state) {
   updateState = state;
+  logUpdate(`${state.status}: ${state.message}`);
   if (win && !win.isDestroyed()) win.webContents.send('update', state);
 }
 
@@ -85,6 +92,9 @@ function setupAutoUpdate() {
   if (!app.isPackaged) return;
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  // testing aid: point the updater at any folder served over http instead of GitHub
+  if (process.env.LANCHAT_UPDATE_URL) autoUpdater.setFeedURL({ provider: 'generic', url: process.env.LANCHAT_UPDATE_URL });
+  logUpdate(`starting v${app.getVersion()}, feed: ${process.env.LANCHAT_UPDATE_URL || 'GitHub releases'}`);
   autoUpdater.on('checking-for-update', () => setUpdate({ status: 'checking', message: 'Checking for updates...' }));
   autoUpdater.on('update-available', (i) => setUpdate({ status: 'downloading', message: `Downloading v${i.version}...` }));
   autoUpdater.on('update-not-available', () => setUpdate({ status: 'idle', message: 'You are up to date.' }));

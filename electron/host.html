@@ -27,6 +27,9 @@
   <div class="card">
     <h2>Open this on any device on your network</h2>
     <div id="urls"></div>
+    <h2 style="margin-top:14px">For voice channels use the secure link</h2>
+    <div id="surls"></div>
+    <small>Browsers only allow the microphone on https. Each device shows a certificate warning once: choose Advanced, then Continue.</small>
     <div class="row" style="margin-top:10px">
       <small>If other devices can't connect, allow LanChat Host through Windows Firewall (Private networks).</small>
       <button id="open" class="grey">Open here</button>
@@ -60,6 +63,17 @@
     $('check').disabled = u.status === 'checking' || u.status === 'downloading' || u.status === 'dev';
   }
 
+  function fill(box, list) {
+    box.replaceChildren();
+    for (const u of list) {
+      const row = document.createElement('div'); row.className = 'url';
+      const code = document.createElement('code'); code.textContent = u;
+      const btn = document.createElement('button'); btn.textContent = 'Copy'; btn.className = 'grey';
+      btn.onclick = async () => { await window.host.copy(u); btn.textContent = 'Copied'; setTimeout(() => (btn.textContent = 'Copy'), 1200); };
+      row.append(code, btn); box.append(row);
+    }
+  }
+
   async function load() {
     info = await window.host.info();
     $('ver').textContent = info.version;
@@ -67,16 +81,8 @@
     $('auto').checked = info.autoLaunch;
     $('users').textContent = info.stats.users;
     $('online').textContent = info.stats.online;
-    const urls = $('urls');
-    urls.replaceChildren();
-    const list = info.urls.length ? info.urls : [info.local];
-    for (const u of list) {
-      const row = document.createElement('div'); row.className = 'url';
-      const code = document.createElement('code'); code.textContent = u;
-      const btn = document.createElement('button'); btn.textContent = 'Copy'; btn.className = 'grey';
-      btn.onclick = async () => { await window.host.copy(u); btn.textContent = 'Copied'; setTimeout(() => (btn.textContent = 'Copy'), 1200); };
-      row.append(code, btn); urls.append(row);
-    }
+    fill($('urls'), info.urls.length ? info.urls : [info.local]);
+    fill($('surls'), info.secureUrls.length ? info.secureUrls : ['(HTTPS unavailable)']);
     renderUpdate(info.update);
   }
 

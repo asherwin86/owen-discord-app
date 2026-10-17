@@ -71,6 +71,28 @@ const { startServer } = require('../server');
   assert.strictEqual(ch.name, 'game-night');
   ok(await call('POST', '/api/messages', b, { chat: `chan:${s}:${ch.id}`, text: 'gg' }));
   ok(await call('POST', '/api/messages', c, { chat: `chan:${s}:${ch.id}`, text: 'not a member' }), 404);
+  // voice channels: no text, membership enforced, signalling relayed, occupancy tracked
+  const lounge = (await call('GET', '/api/me', a)).body.servers[0].channels.find((c) => c.type === 'voice');
+  assert(lounge, 'new servers get a voice channel');
+  ok(await call('POST', '/api/messages', b, { chat: `chan:${s}:${lounge.id}`, text: 'x' }), 404);
+  const sockA = io(base, { auth: { token: a } });
+  await new Promise((r) => sockA.on('connect', r));
+  const ack = (sock, ev, data) => new Promise((r) => sock.emit(ev, data, r));
+  assert.deepStrictEqual((await ack(sockA, 'voice:join', { serverId: s, channelId: lounge.id })).peers, []);
+  assert.strictEqual((await ack(sockB, 'voice:join', { serverId: s, channelId: lounge.id })).peers.length, 1);
+  assert((await ack(sockC, 'voice:join', { serverId: s, channelId: lounge.id })).error, 'non-member joined voice');
+  const sig = new Promise((r) => sockA.once('voice:signal', r));
+  sockC.emit('voice:signal', { to: meA.me.id, data: { sdp: 'evil' } });   // carol is not in the room: dropped
+  sockB.emit('voice:signal', { to: meA.me.id, data: { sdp: { type: 'offer', sdp: 'x' } } });
+  const relayed = await sig;
+  assert.strictEqual(relayed.from, meB.me.id);
+  assert.strictEqual(relayed.data.sdp.type, 'offer');
+  assert.strictEqual((await call('GET', '/api/me', a)).body.servers[0].voice[lounge.id].length, 2);
+  const left = new Promise((r) => sockA.once('voice:peer-left', r));
+  sockB.disconnect();   // dropping the socket must remove them from the room
+  assert.strictEqual((await left).userId, meB.me.id);
+  assert.strictEqual((await call('GET', '/api/me', a)).body.servers[0].voice[lounge.id].length, 1);
+  sockA.close();
   ok(await call('POST', `/api/servers/${s}/leave`, b));
 
   // bad input

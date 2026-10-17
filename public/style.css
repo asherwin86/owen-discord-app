@@ -94,6 +94,19 @@ input[type=text], input[type=password], textarea {
 .frow .sub { color: var(--muted); font-size: 12px; }
 .addform { display: flex; gap: 8px; max-width: 520px; margin-bottom: 8px; }
 
+/* ---- voice ---- */
+.vuser { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 28px; color: var(--muted); font-size: 14px; }
+.vuser .avatar, .vtile .avatar { box-shadow: 0 0 0 2px transparent; transition: box-shadow .1s; }
+.speaking .avatar { box-shadow: 0 0 0 3px var(--green); }
+.voice-bar { flex: none; display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: #232428; border-top: 1px solid var(--bg3); }
+.voice-bar .grow { flex: 1; min-width: 0; }
+.vb-title { color: var(--green); font-weight: 700; font-size: 13px; }
+.sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vgrid { display: flex; flex-wrap: wrap; gap: 16px; margin: 8px 0 24px; }
+.vtile { background: var(--bg2); border-radius: 8px; width: 140px; padding: 18px 8px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.avatar.big { width: 72px; height: 72px; font-size: 28px; }
+.vactions { display: flex; gap: 8px; }
+
 /* ---- modal ---- */
 .overlay { position: fixed; inset: 0; background: #000a; display: grid; place-items: center; padding: 16px; z-index: 10; }
 .modal { background: var(--bg); border-radius: 8px; padding: 20px; width: 100%; max-width: 420px;

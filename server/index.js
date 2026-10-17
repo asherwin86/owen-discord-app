@@ -1,15 +1,18 @@
 'use strict';
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
 const { Server } = require('socket.io');
 const { Store } = require('./store');
+const { ensureCert } = require('./cert');
 
 const newId = () => crypto.randomBytes(8).toString('hex');
 const MAX_MSG = 2000;
 const MAX_HISTORY = 2000;
+const MAX_VOICE = 8; // peer-to-peer mesh: every extra person adds a connection for everyone
 
 function lanAddresses() {
   const out = [];
@@ -36,7 +39,7 @@ function listen(server, port, tries = 10) {
   });
 }
 
-async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirname, '..', 'public') }) {
+async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir = path.join(__dirname, '..', 'public') }) {
   const store = new Store(path.join(dataDir, 'data.json'));
   const db = store.db;
 
@@ -48,7 +51,13 @@ async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirna
   app.use(express.static(publicDir));
 
   // ---------- helpers ----------
+  let securePort = null;
+  app.get('/api/info', (req, res) => res.json({ httpsPort: securePort }));
+
   const online = new Map(); // userId -> socket count
+  // voice: channelId -> Map(userId -> socketId); one voice connection per user
+  const voiceRooms = new Map();
+  const voiceOf = new Map(); // userId -> { serverId, channelId, socketId }
   const isOnline = (uid) => (online.get(uid) || 0) > 0;
   const pub = (uid) => {
     const u = db.users[uid];
@@ -78,7 +87,11 @@ async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirna
       .filter((s) => s.members.includes(uid))
       .map((s) => ({
         id: s.id, name: s.name, ownerId: s.ownerId, inviteCode: s.inviteCode,
-        channels: s.channels, members: s.members.map(pub),
+        channels: s.channels.map((c) => ({ ...c, type: c.type || 'text' })),
+        members: s.members.map(pub),
+        voice: Object.fromEntries(s.channels
+          .filter((c) => voiceRooms.has(c.id))
+          .map((c) => [c.id, [...voiceRooms.get(c.id).keys()].map(pub)])),
       }));
     return { me: pub(uid), friends, incoming, outgoing, groups, servers };
   }
@@ -99,7 +112,8 @@ async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirna
     }
     if (type === 'chan') {
       const s = db.servers[a];
-      if (!s || !s.members.includes(uid) || !s.channels.some((c) => c.id === b)) return null;
+      // voice channels have no text chat
+      if (!s || !s.members.includes(uid) || !s.channels.some((c) => c.id === b && c.type !== 'voice')) return null;
       return { key: `chan:${a}:${b}`, members: s.members };
     }
     return null;
@@ -248,7 +262,7 @@ async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirna
     if (!name) return fail(res, 400, 'Server needs a name');
     const s = {
       id: newId(), name, ownerId: req.uid, inviteCode: newInvite(), members: [req.uid],
-      channels: [{ id: newId(), name: 'general' }],
+      channels: [{ id: newId(), name: 'general', type: 'text' }, { id: newId(), name: 'Lounge', type: 'voice' }],
     };
     db.servers[s.id] = s;
     store.save();
@@ -272,7 +286,7 @@ async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirna
     const name = cleanName((req.body || {}).name, 24).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
     if (!name) return fail(res, 400, 'Channel needs a name');
     if (s.channels.length >= 30) return fail(res, 400, 'Too many channels');
-    const channel = { id: newId(), name };
+    const channel = { id: newId(), name, type: (req.body || {}).type === 'voice' ? 'voice' : 'text' };
     s.channels.push(channel);
     store.save();
     notify(s.members);
@@ -282,8 +296,12 @@ async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirna
   app.delete('/api/servers/:id/channels/:cid', auth, (req, res) => {
     const s = db.servers[req.params.id];
     if (!s || s.ownerId !== req.uid) return fail(res, 403, 'Only the server owner can delete channels');
-    if (s.channels.length <= 1) return fail(res, 400, 'A server needs at least one channel');
-    if (!s.channels.some((c) => c.id === req.params.cid)) return fail(res, 404, 'Channel not found');
+    const target = s.channels.find((c) => c.id === req.params.cid);
+    if (!target) return fail(res, 404, 'Channel not found');
+    if (target.type !== 'voice' && s.channels.filter((c) => c.type !== 'voice').length <= 1) {
+      return fail(res, 400, 'A server needs at least one text channel');
+    }
+    kickVoice((v) => v.channelId === target.id);
     s.channels = s.channels.filter((c) => c.id !== req.params.cid);
     delete db.messages[`chan:${s.id}:${req.params.cid}`];
     store.save();
@@ -297,9 +315,11 @@ async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirna
     if (!s || !s.members.includes(req.uid)) return fail(res, 404, 'Server not found');
     const before = [...s.members];
     if (s.ownerId === req.uid) {
+      kickVoice((v) => v.serverId === s.id);
       for (const c of s.channels) delete db.messages[`chan:${s.id}:${c.id}`];
       delete db.servers[s.id];
     } else {
+      kickVoice((v, uid) => v.serverId === s.id && uid === req.uid);
       s.members = s.members.filter((m) => m !== req.uid);
     }
     store.save();
@@ -343,12 +363,75 @@ async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirna
     io.to(friendIds(uid).map((f) => 'u:' + f)).emit('presence', { userId: uid, online: isOnline(uid) });
   };
 
+  // ---------- voice ----------
+  // Audio itself flows peer-to-peer (WebRTC); the server only relays the
+  // signalling messages and tracks who is in which channel.
+  function leaveVoice(uid) {
+    const v = voiceOf.get(uid);
+    if (!v) return;
+    voiceOf.delete(uid);
+    const room = voiceRooms.get(v.channelId);
+    if (room) {
+      room.delete(uid);
+      for (const sid of room.values()) io.to(sid).emit('voice:peer-left', { userId: uid });
+      if (!room.size) voiceRooms.delete(v.channelId);
+    }
+    const s = db.servers[v.serverId];
+    if (s) notify(s.members);
+  }
+
+  // remove everyone matching pred(voiceEntry, userId), telling their client
+  function kickVoice(pred) {
+    for (const [uid, v] of [...voiceOf]) {
+      if (!pred(v, uid)) continue;
+      io.to(v.socketId).emit('voice:kicked');
+      leaveVoice(uid);
+    }
+  }
+
+  function joinVoice(socket, { serverId, channelId }, ack) {
+    const uid = socket.uid;
+    const s = db.servers[serverId];
+    const ch = s && s.channels.find((c) => c.id === channelId);
+    if (!s || !s.members.includes(uid) || !ch || ch.type !== 'voice') return ack({ error: 'Voice channel not found' });
+    const cur = voiceOf.get(uid);
+    if (cur && cur.channelId === channelId && cur.socketId === socket.id) return ack({ error: 'Already connected' });
+    if (cur) { io.to(cur.socketId).emit('voice:kicked'); leaveVoice(uid); }
+    const room = voiceRooms.get(channelId) || new Map();
+    if (room.size >= MAX_VOICE) return ack({ error: `Voice channel is full (${MAX_VOICE} people)` });
+    const peers = [...room.keys()].map(pub);
+    room.set(uid, socket.id);
+    voiceRooms.set(channelId, room);
+    voiceOf.set(uid, { serverId, channelId, socketId: socket.id });
+    notify(s.members);
+    ack({ peers });
+  }
+
   io.on('connection', (socket) => {
     const uid = socket.uid;
     socket.join('u:' + uid);
     online.set(uid, (online.get(uid) || 0) + 1);
     if (online.get(uid) === 1) presence(uid);
+
+    socket.on('voice:join', (data, ack) => {
+      if (typeof ack !== 'function') return;
+      joinVoice(socket, data || {}, ack);
+    });
+    socket.on('voice:leave', () => {
+      const v = voiceOf.get(uid);
+      if (v && v.socketId === socket.id) leaveVoice(uid);
+    });
+    // relay SDP offers/answers and ICE candidates between two people in the same room
+    socket.on('voice:signal', ({ to, data } = {}) => {
+      const me = voiceOf.get(uid);
+      const them = voiceOf.get(to);
+      if (!me || !them || me.socketId !== socket.id || me.channelId !== them.channelId) return;
+      io.to(them.socketId).emit('voice:signal', { from: uid, data });
+    });
+
     socket.on('disconnect', () => {
+      const v = voiceOf.get(uid);
+      if (v && v.socketId === socket.id) leaveVoice(uid);
       online.set(uid, (online.get(uid) || 1) - 1);
       if (!isOnline(uid)) presence(uid);
     });
@@ -356,14 +439,34 @@ async function startServer({ port = 3000, dataDir, publicDir = path.join(__dirna
 
   // ---------- go ----------
   const boundPort = await listen(server, port);
+
+  // HTTPS (needed for microphone access from other devices). Failure is not fatal.
+  let httpsServer = null;
+  try {
+    const ips = lanAddresses();
+    httpsServer = https.createServer(ensureCert(dataDir, ips), app);
+    io.attach(httpsServer, { maxHttpBufferSize: 1e5 });
+    securePort = await listen(httpsServer, httpsPort);
+  } catch (e) {
+    console.error('HTTPS unavailable, voice will only work on localhost:', e.message);
+    httpsServer = null;
+    securePort = null;
+  }
+
   return {
     port: boundPort,
+    httpsPort: securePort,
     urls: () => lanAddresses().map((ip) => `http://${ip}:${boundPort}`),
+    secureUrls: () => (securePort ? lanAddresses().map((ip) => `https://${ip}:${securePort}`) : []),
     localUrl: `http://localhost:${boundPort}`,
-    stats: () => ({ users: Object.keys(db.users).length, online: online.size }),
+    stats: () => ({
+      users: Object.keys(db.users).length,
+      online: [...online.values()].filter((n) => n > 0).length,
+    }),
     close: () => new Promise((resolve) => {
       store.flush();
       io.close(() => resolve());
+      if (httpsServer) httpsServer.close();
     }),
   };
 }
