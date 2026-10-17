@@ -1,0 +1,55 @@
+{
+  "name": "lanchat",
+  "productName": "LanChat Host",
+  "version": "1.0.0",
+  "description": "Self-hosted chat (friends, groups, servers) served from a Windows app to your local network.",
+  "main": "electron/main.js",
+  "author": "LanChat",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server/standalone.js",
+    "icon": "node scripts/make-icon.js",
+    "test": "node scripts/smoke-test.js",
+    "dist": "electron-builder --win --publish never",
+    "release": "electron-builder --win --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9",
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8",
+    "socket.io-client": "^4.8.1"
+  },
+  "build": {
+    "appId": "com.lanchat.host",
+    "productName": "LanChat Host",
+    "directories": { "output": "dist" },
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "public/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "asherwin86",
+        "repo": "owen-discord-app"
+      }
+    ]
+  }
+}
