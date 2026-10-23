@@ -14,14 +14,17 @@ const { startServer } = require('../server');
   let target = null;
   try { target = JSON.parse(fs.readFileSync(pointer, 'utf8')).userData; } catch { /* no pointer: use default */ }
   if (target) {
-    if (!fs.existsSync(path.parse(target).root)) {
-      // Don't silently start with an empty database when the drive is unplugged.
+    // At Windows login a secondary drive can take a while to appear, so wait for it.
+    const root = path.parse(target).root;
+    const give_up = Date.now() + 90_000;
+    while (!fs.existsSync(root) && Date.now() < give_up) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
+    if (!fs.existsSync(root)) {
+      // Never fall back to the default folder: that would silently run on an old/empty database.
       require('electron').dialog.showErrorBox('LanChat Host', `The data folder is on a drive that isn't available:\n${target}\n\nConnect it and start the app again.`);
-      app.exit(1);
-    } else {
-      fs.mkdirSync(target, { recursive: true });
-      app.setPath('userData', target);
+      process.exit(1);
     }
+    fs.mkdirSync(target, { recursive: true });
+    app.setPath('userData', target);
   }
 }
 
