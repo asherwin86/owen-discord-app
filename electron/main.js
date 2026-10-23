@@ -9,22 +9,44 @@ const { startServer } = require('../server');
 // A pointer file in the default folder can move it, e.g. to another drive:
 //   %APPDATA%\LanChat Host\location.json  ->  { "userData": "E:\\LanChat Data" }
 // Must run before anything touches userData (single-instance lock, server, ...).
+// The rule: if a pointer file exists, the app runs on that folder or not at all.
+// It never falls back to the default folder, which would silently run a second,
+// empty database (e.g. one copy on C: and one on E:).
+// (LANCHAT_POINTER_DIR / LANCHAT_DRIVE_WAIT_MS exist so this can be tested.)
 {
-  const pointer = path.join(app.getPath('appData'), 'LanChat Host', 'location.json');
+  const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const fatal = (msg) => {
+    require('electron').dialog.showErrorBox('LanChat Host', msg);
+    process.exit(1);
+  };
+  const pointer = path.join(process.env.LANCHAT_POINTER_DIR || path.join(app.getPath('appData'), 'LanChat Host'), 'location.json');
+
   let target = null;
-  try { target = JSON.parse(fs.readFileSync(pointer, 'utf8')).userData; } catch { /* no pointer: use default */ }
+  if (fs.existsSync(pointer)) {
+    // Retry: a virus scanner or sync tool can briefly lock the file.
+    for (let i = 0; i < 5 && !target; i++) {
+      try {
+        const t = JSON.parse(fs.readFileSync(pointer, 'utf8')).userData;
+        if (typeof t === 'string' && t.trim()) target = t;
+      } catch { /* try again */ }
+      if (!target) sleep(300);
+    }
+    if (!target) fatal(`Could not read the data folder location from:\n${pointer}\n\nFix or delete that file, then start the app again.`);
+  }
+
   if (target) {
     // At Windows login a secondary drive can take a while to appear, so wait for it.
     const root = path.parse(target).root;
-    const give_up = Date.now() + 90_000;
-    while (!fs.existsSync(root) && Date.now() < give_up) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
-    if (!fs.existsSync(root)) {
-      // Never fall back to the default folder: that would silently run on an old/empty database.
-      require('electron').dialog.showErrorBox('LanChat Host', `The data folder is on a drive that isn't available:\n${target}\n\nConnect it and start the app again.`);
-      process.exit(1);
-    }
-    fs.mkdirSync(target, { recursive: true });
+    const giveUp = Date.now() + Number(process.env.LANCHAT_DRIVE_WAIT_MS || 90_000);
+    while (!fs.existsSync(root) && Date.now() < giveUp) sleep(1000);
+    if (!fs.existsSync(root)) fatal(`The data folder is on a drive that isn't available:\n${target}\n\nConnect it and start the app again.`);
+
+    try { fs.mkdirSync(target, { recursive: true }); } catch (e) { fatal(`Could not open the data folder:\n${target}\n\n${e.message}`); }
     app.setPath('userData', target);
+    // Belt and braces: make sure Electron really adopted it before anything uses it.
+    if (path.resolve(app.getPath('userData')).toLowerCase() !== path.resolve(target).toLowerCase()) {
+      fatal(`The data folder could not be applied:\n${target}`);
+    }
   }
 }
 

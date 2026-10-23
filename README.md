@@ -60,4 +60,4 @@ By default the installed app keeps everything in `%APPDATA%\LanChat Host` (accou
 { "userData": "E:\\LanChat Data" }
 ```
 
-On this PC the data lives in `E:\LanChat Data`. If that drive isn't connected the app shows an error and quits rather than starting with an empty database. Back up `data\data.json` to keep accounts and history.
+On this PC the data lives in `E:\LanChat Data`. If a `location.json` exists the app runs on that folder or not at all: it waits up to 90 seconds for the drive at startup, and if the drive is missing or the file is unreadable it shows an error and quits rather than falling back to the default folder (which would silently run a second, empty database). Opening the app while it is already running just brings up the existing window. Back up `data\data.json` to keep accounts and history.
