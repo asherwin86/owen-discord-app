@@ -206,24 +206,125 @@ function serverModal() {
   ]);
 }
 
+// ---------- server roles ----------
+const PERM_LABELS = {
+  administrator: 'Administrator (can do everything)',
+  manageChannels: 'Manage channels',
+  manageRoles: 'Manage roles',
+  kickMembers: 'Kick members',
+  sendMessages: 'Send messages',
+  connectVoice: 'Join voice channels',
+};
+const freshServer = (id) => S.servers.find((x) => x.id === id);
+const rankOfRole = (s, r) => s.roles.indexOf(r) + 1;
+const canManageRoleUi = (s, r) => s.myPerms.manageRoles && rankOfRole(s, r) < s.myRank;
+// colour of a member's highest-ranked role (undefined when they have none with a colour)
+function nameColor(s, userId) {
+  const m = s && s.members.find((x) => x.id === userId);
+  if (!m) return undefined;
+  for (let i = s.roles.length - 1; i >= 0; i--) if (m.roles.includes(s.roles[i].id)) return s.roles[i].color;
+  return undefined;
+}
+const roleChip = (r) => el('span', { class: 'chip' }, el('i', { style: `background:${r.color}` }), r.name);
+
 function serverInfoModal(s) {
   const mine = s.ownerId === S.me.id;
-  modal(s.name, [
-    el('label', {}, 'Invite code - share it with friends'), el('div', { class: 'code' }, s.inviteCode),
-    el('label', {}, `Members (${s.members.length})`),
-    ...s.members.map((m) => el('div', { class: 'frow' }, el('div', { class: 'avatar sm' }, initial(m.username)),
-      el('div', { class: 'grow' }, m.username + (m.id === s.ownerId ? ' (owner)' : '')))),
-  ], [{
+  const reopen = async () => { await refresh(); const f = freshServer(s.id); if (f) serverInfoModal(f); };
+  const members = [...s.members].sort((a, b) => b.rank - a.rank || a.username.localeCompare(b.username));
+  const buttons = [];
+  if (s.myPerms.manageRoles) buttons.push({ label: 'Manage roles', run: () => { setTimeout(() => rolesModal(s)); } });
+  buttons.push({
     label: mine ? 'Delete server' : 'Leave server', cls: 'red',
     run: async () => {
       if (!confirm(mine ? `Delete "${s.name}" for everyone?` : `Leave "${s.name}"?`)) return false;
       await api('POST', `/api/servers/${s.id}/leave`);
     },
+  });
+  const close = modal(s.name, [
+    el('label', {}, 'Invite code - share it with friends'), el('div', { class: 'code' }, s.inviteCode),
+    el('label', {}, `Members (${s.members.length})`),
+    ...members.map((m) => {
+      const roles = m.roles.map((id) => s.roles.find((r) => r.id === id)).filter(Boolean).reverse();
+      const lower = m.id !== S.me.id && m.id !== s.ownerId && s.myRank > m.rank;   // only people ranked below you
+      return el('div', { class: 'frow' },
+        el('div', { class: 'avatar sm' }, initial(m.username)),
+        el('div', { class: 'grow' },
+          el('div', { style: nameColor(s, m.id) ? `color:${nameColor(s, m.id)}` : '' }, m.username + (m.id === s.ownerId ? ' (owner)' : '')),
+          roles.length ? el('div', { class: 'chips' }, ...roles.map(roleChip)) : null),
+        lower && s.myPerms.manageRoles && s.roles.length ? el('button', { class: 'btn grey small', onclick: () => { close(); memberRolesModal(s, m); } }, 'Roles') : null,
+        lower && s.myPerms.kickMembers ? el('button', { class: 'btn red small', onclick: async () => {
+          if (!confirm(`Kick ${m.username} from ${s.name}?`)) return;
+          close(); await act(api('DELETE', `/api/servers/${s.id}/members/${m.id}`)); reopen();
+        } }, 'Kick') : null);
+    }),
+  ], buttons);
+}
+
+function memberRolesModal(s, m) {
+  const boxes = s.roles.slice().reverse().map((r) => {
+    const cb = el('input', { type: 'checkbox', value: r.id, checked: m.roles.includes(r.id), disabled: !canManageRoleUi(s, r) });
+    return { cb, node: el('label', { class: 'check' }, cb, roleChip(r), canManageRoleUi(s, r) ? null : el('span', { class: 'sub' }, ' (ranked above you)')) };
+  });
+  modal(`Roles for ${m.username}`, [
+    boxes.length ? el('div', {}, ...boxes.map((b) => b.node)) : el('p', { class: 'sub' }, 'This server has no roles yet.'),
+  ], [{ label: 'Save', run: async () => {
+    await api('PUT', `/api/servers/${s.id}/members/${m.id}/roles`, { roles: boxes.filter((b) => b.cb.checked).map((b) => b.cb.value) });
+    await refresh(); const f = freshServer(s.id); if (f) setTimeout(() => serverInfoModal(f));
+  } }]);
+}
+
+function rolesModal(s) {
+  const reopen = async () => { await refresh(); const f = freshServer(s.id); if (f) rolesModal(f); };
+  const move = async (r, dir) => { close(); await act(api('POST', `/api/servers/${s.id}/roles/${r.id}/move`, { dir })); reopen(); };
+  const rows = s.roles.slice().reverse().map((r) => {
+    const ok = canManageRoleUi(s, r);
+    const i = s.roles.indexOf(r);
+    return el('div', { class: 'frow' },
+      el('div', { class: 'grow' }, roleChip(r)),
+      ok && i + 2 < s.myRank && i + 1 < s.roles.length ? el('button', { class: 'icon-btn', title: 'Move up', onclick: () => move(r, 'up') }, '▲') : null,
+      ok && i > 0 ? el('button', { class: 'icon-btn', title: 'Move down', onclick: () => move(r, 'down') }, '▼') : null,
+      ok ? el('button', { class: 'btn grey small', onclick: () => { close(); roleEditor(s, r); } }, 'Edit') : el('span', { class: 'sub' }, 'locked'),
+      ok ? el('button', { class: 'btn red small', onclick: async () => {
+        if (!confirm(`Delete the role "${r.name}"?`)) return;
+        close(); await act(api('DELETE', `/api/servers/${s.id}/roles/${r.id}`)); reopen();
+      } }, 'Delete') : null);
+  });
+  const close = modal(`Roles in ${s.name}`, [
+    el('div', { class: 'sub', style: 'white-space:normal' }, 'Highest rank first. You can only manage roles ranked below your own, and only give out permissions you have.'),
+    ...rows,
+    el('div', { class: 'frow' }, el('div', { class: 'grow' }, el('b', {}, '@everyone'), el('div', { class: 'sub' }, 'Permissions every member has')),
+      el('button', { class: 'btn grey small', onclick: () => { close(); roleEditor(s, 'everyone'); } }, 'Edit')),
+  ], [{ label: 'New role', run: () => { setTimeout(() => roleEditor(s, null)); } }]);
+}
+
+// role: an existing role, null for a new one, or 'everyone' for the default permissions
+function roleEditor(s, role) {
+  const isEveryone = role === 'everyone';
+  const perms = isEveryone ? s.everyone : (role ? role.permissions : {});
+  const name = el('input', { type: 'text', maxlength: 24, value: role && !isEveryone ? role.name : '', placeholder: 'Moderator' });
+  const color = el('input', { type: 'color', value: role && !isEveryone ? role.color : '#5865f2', style: 'width:60px;height:36px;padding:0;border:0;background:none' });
+  const boxes = Object.keys(PERM_LABELS).map((k) => {
+    // you can't change a permission you don't hold yourself
+    const cb = el('input', { type: 'checkbox', checked: !!perms[k], disabled: !s.myPerms[k] });
+    return { k, cb, node: el('label', { class: 'check' }, cb, PERM_LABELS[k], s.myPerms[k] ? null : el('span', { class: 'sub' }, ' (you don\'t have this)')) };
+  });
+  const body = [];
+  if (!isEveryone) body.push(el('label', {}, 'Role name'), name, el('label', {}, 'Colour'), color);
+  body.push(el('label', {}, 'Permissions'), ...boxes.map((b) => b.node));
+  modal(isEveryone ? '@everyone permissions' : (role ? `Edit ${role.name}` : 'New role'), body, [{
+    label: 'Save', run: async () => {
+      const permissions = Object.fromEntries(boxes.map((b) => [b.k, b.cb.checked]));
+      if (isEveryone) await api('PATCH', `/api/servers/${s.id}/roles/everyone`, { permissions });
+      else if (role) await api('PATCH', `/api/servers/${s.id}/roles/${role.id}`, { name: name.value, color: color.value, permissions });
+      else await api('POST', `/api/servers/${s.id}/roles`, { name: name.value, color: color.value, permissions });
+      await refresh(); const f = freshServer(s.id); if (f) setTimeout(() => rolesModal(f));
+    },
   }]);
 }
 
 function membersModal(info) {
-  const members = info.group ? info.group.members : info.server.members;
+  if (info.server) { serverInfoModal(info.server); return; }
+  const members = info.group.members;
   const nodes = [...members.map((m) => el('div', { class: 'frow' }, el('div', { class: 'avatar sm' }, initial(m.username)),
     el('div', { class: 'grow' }, m.username)))];
   if (info.group) {
@@ -303,7 +404,7 @@ function renderSide() {
 
   if (ui.serverId) {
     const s = S.servers.find((x) => x.id === ui.serverId);
-    const mine = s.ownerId === S.me.id;
+    const mine = s.myPerms.manageChannels;   // may add channels
     side.replaceChildren(
       el('div', { class: 'side-head click', onclick: () => serverInfoModal(s), title: 'Server info & invite code' },
         el('span', {}, s.name), el('span', {}, '⌄')),
@@ -386,6 +487,10 @@ function renderMain() {
   const list = el('div', { class: 'messages', id: 'messages' });
   const input = el('textarea', { id: 'composer', rows: 1, maxlength: 2000, placeholder: 'Message ' + info.title, 'data-chat': ui.chat });
   input.value = draft;
+  if (info.server && !info.server.myPerms.sendMessages) {   // role permissions can take away chatting
+    input.disabled = true;
+    input.placeholder = "You don't have permission to send messages in this server";
+  }
   const send = async () => {
     const text = input.value.trim();
     if (!text) return;
@@ -419,6 +524,12 @@ function paintMessages(list, items) {
   list.scrollTop = list.scrollHeight;
 }
 
+// author name colour in server channels = their highest role's colour
+function roleColorFor(m) {
+  if (!m.chat || !m.chat.startsWith('chan:')) return '';
+  const c = nameColor(freshServer(m.chat.split(':')[1]), m.userId);
+  return c ? `color:${c}` : '';
+}
 const fmt = (ts) => new Date(ts).toLocaleString([], { hour: 'numeric', minute: '2-digit', month: 'short', day: 'numeric' });
 function messageNode(m, prev) {
   const grouped = prev && prev.userId === m.userId && m.ts - prev.ts < 5 * 60_000;
@@ -427,7 +538,7 @@ function messageNode(m, prev) {
       ? el('div', { class: 'gutter' }, new Date(m.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }))
       : el('div', { class: 'avatar' }, initial(m.username)),
     el('div', {},
-      grouped ? null : el('div', { class: 'meta' }, el('b', {}, m.username), el('span', {}, fmt(m.ts))),
+      grouped ? null : el('div', { class: 'meta' }, el('b', { style: roleColorFor(m) }, m.username), el('span', {}, fmt(m.ts))),
       el('div', { class: 'text' }, m.text)));
 }
 

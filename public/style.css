@@ -111,6 +111,12 @@ select { background: var(--bg3); border: 0; border-radius: 4px; padding: 8px; wi
 .modal img { max-width: 100%; height: auto; }
 .code { overflow-wrap: anywhere; font-size: 12px; }
 
+/* ---- roles ---- */
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.chip { display: inline-flex; align-items: center; gap: 5px; background: var(--bg3); border-radius: 10px; padding: 1px 8px 1px 6px; font-size: 12px; color: var(--text); }
+.chip i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.composer textarea:disabled { opacity: .6; cursor: not-allowed; }
+
 /* ---- modal ---- */
 .overlay { position: fixed; inset: 0; background: #000a; display: grid; place-items: center; padding: 16px; z-index: 10; }
 .modal { background: var(--bg); border-radius: 8px; padding: 20px; width: 100%; max-width: 420px;

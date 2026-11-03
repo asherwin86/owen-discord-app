@@ -103,6 +103,78 @@ const { startServer } = require('../server');
   sockA.close();
   ok(await call('POST', `/api/servers/${s}/leave`, b));
 
+  // ---- server roles: permissions, hierarchy, @everyone, kick ----
+  const rs = (await call('POST', '/api/servers', a, { name: 'RoleTest' })).body.id;
+  const rsrv = async (t) => (await call('GET', '/api/me', t)).body.servers.find((x) => x.id === rs);
+  const code = (await rsrv(a)).inviteCode;
+  ok(await call('POST', '/api/servers/join', b, { code }));
+  ok(await call('POST', '/api/servers/join', c, { code }));
+  const general = (await rsrv(a)).channels.find((x) => x.type === 'text').id;
+  const loungeId = (await rsrv(a)).channels.find((x) => x.type === 'voice').id;
+  const P = (o) => ({ sendMessages: true, ...o });
+
+  // a plain member can't manage anything
+  ok(await call('POST', `/api/servers/${rs}/roles`, b, { name: 'nope' }), 403);
+  ok(await call('POST', `/api/servers/${rs}/channels`, b, { name: 'nope' }), 403);
+  ok(await call('DELETE', `/api/servers/${rs}/members/${meC.me.id}`, b), 403);
+
+  // owner builds Helper < Mod < Boss (new owner roles go on top)
+  const helper = (await call('POST', `/api/servers/${rs}/roles`, a, { name: 'Helper', color: '#ff0000', permissions: P({ connectVoice: true }) })).body;
+  const mod = (await call('POST', `/api/servers/${rs}/roles`, a, { name: 'Mod', color: 'bogus', permissions: P({ manageChannels: true, kickMembers: true, manageRoles: true }) })).body;
+  const boss = (await call('POST', `/api/servers/${rs}/roles`, a, { name: 'Boss', permissions: { administrator: true } })).body;
+  assert.strictEqual(mod.color, '#99aab5', 'invalid colour falls back to the default');
+  assert.deepStrictEqual((await rsrv(a)).roles.map((r) => r.name), ['Helper', 'Mod', 'Boss']);
+  ok(await call('POST', `/api/servers/${rs}/roles`, a, { name: '' }), 400);
+
+  // give b the Mod role: b can now manage channels
+  ok(await call('PUT', `/api/servers/${rs}/members/${meB.me.id}/roles`, a, { roles: [mod.id] }));
+  ok(await call('PUT', `/api/servers/${rs}/members/${meB.me.id}/roles`, a, { roles: ['no-such-role'] }), 400);
+  const bState = await rsrv(b);
+  assert.strictEqual(bState.myPerms.manageChannels, true);
+  assert.strictEqual(bState.myRank, 2);
+  ok(await call('POST', `/api/servers/${rs}/channels`, b, { name: 'by-mod' }));
+
+  // hierarchy: b (Mod) can't touch Boss or Mod-or-above, can't hand out permissions it lacks
+  ok(await call('PATCH', `/api/servers/${rs}/roles/${boss.id}`, b, { name: 'x' }), 403);
+  ok(await call('PATCH', `/api/servers/${rs}/roles/${mod.id}`, b, { name: 'x' }), 403);
+  ok(await call('DELETE', `/api/servers/${rs}/roles/${boss.id}`, b), 403);
+  ok(await call('PUT', `/api/servers/${rs}/members/${meC.me.id}/roles`, b, { roles: [boss.id] }), 403);
+  ok(await call('POST', `/api/servers/${rs}/roles`, b, { name: 'Sneaky', permissions: { administrator: true } }), 403);
+  ok(await call('PUT', `/api/servers/${rs}/members/${meA.me.id}/roles`, b, { roles: [helper.id] }), 403);   // owner
+  const tmp = (await call('POST', `/api/servers/${rs}/roles`, b, { name: 'Tmp', permissions: P({}) })).body;
+  assert.deepStrictEqual((await rsrv(a)).roles.map((r) => r.name), ['Helper', 'Tmp', 'Mod', 'Boss'], "b's new role goes just below b's own rank");
+  ok(await call('POST', `/api/servers/${rs}/roles/${tmp.id}/move`, b, { dir: 'up' }), 403);   // would reach b's own rank
+
+  // @everyone: take away sending and voice for people without a role
+  ok(await call('PATCH', `/api/servers/${rs}/roles/everyone`, a, { permissions: { sendMessages: false, connectVoice: false } }));
+  ok(await call('POST', '/api/messages', c, { chat: `chan:${rs}:${general}`, text: 'muted' }), 403);
+  assert.strictEqual((await ack(sockC, 'voice:join', { serverId: rs, channelId: loungeId })).error?.includes('permission'), true);
+  ok(await call('POST', '/api/messages', b, { chat: `chan:${rs}:${general}`, text: 'mods can talk' }));
+  // Helper restores both for c
+  ok(await call('PUT', `/api/servers/${rs}/members/${meC.me.id}/roles`, b, { roles: [helper.id] }));
+  ok(await call('POST', '/api/messages', c, { chat: `chan:${rs}:${general}`, text: 'now allowed' }));
+  assert.deepStrictEqual((await ack(sockC, 'voice:join', { serverId: rs, channelId: loungeId })).peers, []);
+  sockC.emit('voice:leave');
+
+  // reordering by the owner
+  ok(await call('POST', `/api/servers/${rs}/roles/${helper.id}/move`, a, { dir: 'up' }));
+  assert.deepStrictEqual((await rsrv(a)).roles.map((r) => r.name), ['Tmp', 'Helper', 'Mod', 'Boss']);
+
+  // deleting a role removes it from members
+  ok(await call('DELETE', `/api/servers/${rs}/roles/${helper.id}`, a));
+  assert.deepStrictEqual((await rsrv(c)).members.find((m) => m.id === meC.me.id).roles, []);
+
+  // kick: needs the permission and a lower rank; the owner can't be kicked
+  ok(await call('DELETE', `/api/servers/${rs}/members/${meA.me.id}`, b), 403);
+  ok(await call('DELETE', `/api/servers/${rs}/members/${meB.me.id}`, b), 400);
+  ok(await call('DELETE', `/api/servers/${rs}/members/${meC.me.id}`, b));
+  assert.strictEqual(await rsrv(c), undefined, 'kicked member no longer has the server');
+  ok(await call('POST', '/api/messages', c, { chat: `chan:${rs}:${general}`, text: 'ghost' }), 404);
+
+  // admins can do everything; the persisted shape survives a restart (see below)
+  ok(await call('PUT', `/api/servers/${rs}/members/${meB.me.id}/roles`, a, { roles: [boss.id] }));
+  assert.strictEqual((await rsrv(b)).myPerms.kickMembers, true);
+
   // bad input
   ok(await call('POST', '/api/messages', a, { chat: 'dm:' + meB.me.id, text: '   ' }), 400);
   ok(await call('GET', '/api/me', 'bogus'), 401);
@@ -111,6 +183,16 @@ const { startServer } = require('../server');
   srv.stats(); await srv.close();
   const saved = JSON.parse(fs.readFileSync(path.join(dir, 'data.json'), 'utf8'));
   assert.strictEqual(Object.keys(saved.users).length, 3);
+
+  // a server saved before roles existed (no roles/everyone/memberRoles) loads with sane defaults
+  for (const sv of Object.values(saved.servers)) { delete sv.roles; delete sv.everyone; delete sv.memberRoles; }
+  fs.writeFileSync(path.join(dir, 'data.json'), JSON.stringify(saved));
+  const srv2 = await startServer({ port: 3901, httpsPort: 3944, dataDir: dir });
+  const old = (await (await fetch(srv2.localUrl + '/api/me', { headers: { Authorization: 'Bearer ' + a } })).json()).servers[0];
+  assert.deepStrictEqual(old.roles, []);
+  assert.strictEqual(old.everyone.sendMessages, true);
+  assert.strictEqual(old.myPerms.manageChannels, true, 'owner keeps full control of old servers');
+  await srv2.close();
 
   sockB.close(); sockC.close();
   assert(!leaked, 'carol received a DM she was not part of');

@@ -9,6 +9,7 @@ const { Server } = require('socket.io');
 const QRCode = require('qrcode');
 const { Store } = require('./store');
 const { ensureCert } = require('./cert');
+const R = require('./roles');
 
 const newId = () => crypto.randomBytes(8).toString('hex');
 const MAX_MSG = 2000;
@@ -43,6 +44,7 @@ function listen(server, port, tries = 10) {
 async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir = path.join(__dirname, '..', 'public') }) {
   const store = new Store(path.join(dataDir, 'data.json'));
   const db = store.db;
+  for (const s of Object.values(db.servers)) R.ensureRoles(s);   // servers created before roles existed
 
   const app = express();
   const server = http.createServer(app);
@@ -96,7 +98,11 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
       .map((s) => ({
         id: s.id, name: s.name, ownerId: s.ownerId, inviteCode: s.inviteCode,
         channels: s.channels.map((c) => ({ ...c, type: c.type || 'text' })),
-        members: s.members.map(pub),
+        members: s.members.map((m) => ({ ...pub(m), roles: s.memberRoles[m] || [], rank: R.rankOf(s, m) })),
+        roles: s.roles,                      // lowest rank first
+        everyone: R.cleanPerms(s.everyone),
+        myPerms: R.permsOf(s, uid),
+        myRank: R.rankOf(s, uid),
         voice: Object.fromEntries(s.channels
           .filter((c) => voiceRooms.has(c.id))
           .map((c) => [c.id, [...voiceRooms.get(c.id).keys()].map(pub)])),
@@ -272,6 +278,7 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
       id: newId(), name, ownerId: req.uid, inviteCode: newInvite(), members: [req.uid],
       channels: [{ id: newId(), name: 'general', type: 'text' }, { id: newId(), name: 'Lounge', type: 'voice' }],
     };
+    R.ensureRoles(s);
     db.servers[s.id] = s;
     store.save();
     notify(s.members);
@@ -290,7 +297,8 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
 
   app.post('/api/servers/:id/channels', auth, (req, res) => {
     const s = db.servers[req.params.id];
-    if (!s || s.ownerId !== req.uid) return fail(res, 403, 'Only the server owner can add channels');
+    if (!s || !s.members.includes(req.uid)) return fail(res, 404, 'Server not found');
+    if (!R.permsOf(s, req.uid).manageChannels) return fail(res, 403, "You don't have permission to manage channels");
     const name = cleanName((req.body || {}).name, 24).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '');
     if (!name) return fail(res, 400, 'Channel needs a name');
     if (s.channels.length >= 30) return fail(res, 400, 'Too many channels');
@@ -303,7 +311,8 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
 
   app.delete('/api/servers/:id/channels/:cid', auth, (req, res) => {
     const s = db.servers[req.params.id];
-    if (!s || s.ownerId !== req.uid) return fail(res, 403, 'Only the server owner can delete channels');
+    if (!s || !s.members.includes(req.uid)) return fail(res, 404, 'Server not found');
+    if (!R.permsOf(s, req.uid).manageChannels) return fail(res, 403, "You don't have permission to manage channels");
     const target = s.channels.find((c) => c.id === req.params.cid);
     if (!target) return fail(res, 404, 'Channel not found');
     if (target.type !== 'voice' && s.channels.filter((c) => c.type !== 'voice').length <= 1) {
@@ -329,9 +338,129 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
     } else {
       kickVoice((v, uid) => v.serverId === s.id && uid === req.uid);
       s.members = s.members.filter((m) => m !== req.uid);
+      delete s.memberRoles[req.uid];
     }
     store.save();
     notify(before);
+    res.json({ ok: true });
+  });
+
+  // ---------- roles ----------
+  const COLOR = /^#[0-9a-f]{6}$/i;
+  // loads the server for a member of it, or answers 404
+  const memberServer = (req, res) => {
+    const s = db.servers[req.params.id];
+    if (!s || !s.members.includes(req.uid)) { fail(res, 404, 'Server not found'); return null; }
+    return R.ensureRoles(s);
+  };
+  const needRoles = (s, req, res) => {
+    if (R.permsOf(s, req.uid).manageRoles) return true;
+    fail(res, 403, "You don't have permission to manage roles");
+    return false;
+  };
+  const roleName = (v) => cleanName(v, 24);
+
+  app.post('/api/servers/:id/roles', auth, (req, res) => {
+    const s = memberServer(req, res); if (!s || !needRoles(s, req, res)) return;
+    const body = req.body || {};
+    const name = roleName(body.name);
+    if (!name) return fail(res, 400, 'Role needs a name');
+    if (s.roles.length >= R.MAX_ROLES) return fail(res, 400, `A server can have at most ${R.MAX_ROLES} roles`);
+    const color = COLOR.test(body.color || '') ? body.color.toLowerCase() : '#99aab5';
+    const permissions = R.cleanPerms(body.permissions);
+    if (!R.canChangePerms(s, req.uid, {}, permissions)) return fail(res, 403, "You can't give a role permissions you don't have");
+    const role = { id: newId(), name, color, permissions };
+    // new roles go just below the creator's own top role (the owner's go on top)
+    const at = Math.min(s.roles.length, Math.max(0, R.rankOf(s, req.uid) - 1));
+    s.roles.splice(at, 0, role);
+    store.save(); notify(s.members);
+    res.json(role);
+  });
+
+  app.patch('/api/servers/:id/roles/:rid', auth, (req, res) => {
+    const s = memberServer(req, res); if (!s || !needRoles(s, req, res)) return;
+    const body = req.body || {};
+    if (req.params.rid === 'everyone') {   // the default permissions every member has
+      const next = R.cleanPerms(body.permissions);
+      if (!R.canChangePerms(s, req.uid, s.everyone, next)) return fail(res, 403, "You can't change permissions you don't have");
+      s.everyone = next;
+    } else {
+      const role = s.roles.find((r) => r.id === req.params.rid);
+      if (!role) return fail(res, 404, 'Role not found');
+      if (!R.canManageRole(s, req.uid, role)) return fail(res, 403, 'That role is ranked at or above yours');
+      if (body.name !== undefined) { const n = roleName(body.name); if (!n) return fail(res, 400, 'Role needs a name'); role.name = n; }
+      if (body.color !== undefined && COLOR.test(body.color)) role.color = body.color.toLowerCase();
+      if (body.permissions !== undefined) {
+        const next = R.cleanPerms(body.permissions);
+        if (!R.canChangePerms(s, req.uid, role.permissions, next)) return fail(res, 403, "You can't change permissions you don't have");
+        role.permissions = next;
+      }
+    }
+    store.save(); notify(s.members);
+    res.json({ ok: true });
+  });
+
+  app.delete('/api/servers/:id/roles/:rid', auth, (req, res) => {
+    const s = memberServer(req, res); if (!s || !needRoles(s, req, res)) return;
+    const role = s.roles.find((r) => r.id === req.params.rid);
+    if (!role) return fail(res, 404, 'Role not found');
+    if (!R.canManageRole(s, req.uid, role)) return fail(res, 403, 'That role is ranked at or above yours');
+    s.roles = s.roles.filter((r) => r !== role);
+    for (const uid of Object.keys(s.memberRoles)) {
+      s.memberRoles[uid] = s.memberRoles[uid].filter((id) => id !== role.id);
+      if (!s.memberRoles[uid].length) delete s.memberRoles[uid];
+    }
+    store.save(); notify(s.members);
+    res.json({ ok: true });
+  });
+
+  // move a role one step up or down the ranking (never up to or past your own rank)
+  app.post('/api/servers/:id/roles/:rid/move', auth, (req, res) => {
+    const s = memberServer(req, res); if (!s || !needRoles(s, req, res)) return;
+    const role = s.roles.find((r) => r.id === req.params.rid);
+    if (!role) return fail(res, 404, 'Role not found');
+    if (!R.canManageRole(s, req.uid, role)) return fail(res, 403, 'That role is ranked at or above yours');
+    const i = s.roles.indexOf(role);
+    const j = (req.body || {}).dir === 'up' ? i + 1 : i - 1;
+    if (j < 0 || j >= s.roles.length) return res.json({ ok: true });
+    if (j > i && j + 1 >= R.rankOf(s, req.uid)) return fail(res, 403, "You can't rank a role at or above your own");
+    [s.roles[i], s.roles[j]] = [s.roles[j], s.roles[i]];
+    store.save(); notify(s.members);
+    res.json({ ok: true });
+  });
+
+  // replace a member's roles
+  app.put('/api/servers/:id/members/:uid/roles', auth, (req, res) => {
+    const s = memberServer(req, res); if (!s || !needRoles(s, req, res)) return;
+    const target = req.params.uid;
+    if (!s.members.includes(target)) return fail(res, 404, 'Member not found');
+    if (target === s.ownerId) return fail(res, 403, "The owner doesn't need roles");
+    if (target !== req.uid && R.rankOf(s, req.uid) <= R.rankOf(s, target)) return fail(res, 403, 'That member is ranked at or above you');
+    const wanted = [...new Set([].concat((req.body || {}).roles || []))];
+    if (wanted.some((id) => !s.roles.some((r) => r.id === id))) return fail(res, 400, 'Unknown role');
+    const current = s.memberRoles[target] || [];
+    const changed = [...wanted.filter((id) => !current.includes(id)), ...current.filter((id) => !wanted.includes(id))];
+    for (const id of changed) {
+      if (!R.canManageRole(s, req.uid, s.roles.find((r) => r.id === id))) return fail(res, 403, 'You can only change roles ranked below yours');
+    }
+    if (wanted.length) s.memberRoles[target] = wanted; else delete s.memberRoles[target];
+    store.save(); notify(s.members);
+    res.json({ ok: true });
+  });
+
+  // kick a member out of the server
+  app.delete('/api/servers/:id/members/:uid', auth, (req, res) => {
+    const s = memberServer(req, res); if (!s) return;
+    if (!R.permsOf(s, req.uid).kickMembers) return fail(res, 403, "You don't have permission to kick members");
+    const target = req.params.uid;
+    if (!s.members.includes(target)) return fail(res, 404, 'Member not found');
+    if (target === req.uid) return fail(res, 400, 'Use Leave server instead');
+    if (target === s.ownerId || R.rankOf(s, req.uid) <= R.rankOf(s, target)) return fail(res, 403, 'That member is ranked at or above you');
+    const before = [...s.members];
+    kickVoice((v, uid) => v.serverId === s.id && uid === target);
+    s.members = s.members.filter((m) => m !== target);
+    delete s.memberRoles[target];
+    store.save(); notify(before);
     res.json({ ok: true });
   });
 
@@ -348,6 +477,9 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
   app.post('/api/messages', auth, (req, res) => {
     const chat = resolveChat(req.uid, (req.body || {}).chat);
     if (!chat) return fail(res, 404, 'Chat not found');
+    if (chat.key.startsWith('chan:') && !R.permsOf(db.servers[chat.key.split(':')[1]], req.uid).sendMessages) {
+      return fail(res, 403, "You don't have permission to send messages here");
+    }
     const text = String((req.body || {}).text || '').replace(/\r\n/g, '\n').trim().slice(0, MAX_MSG);
     if (!text) return fail(res, 400, 'Empty message');
     const msg = { id: newId(), chat: chat.key, userId: req.uid, username: db.users[req.uid].username, text, ts: Date.now() };
@@ -402,6 +534,7 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
     const s = db.servers[serverId];
     const ch = s && s.channels.find((c) => c.id === channelId);
     if (!s || !s.members.includes(uid) || !ch || ch.type !== 'voice') return ack({ error: 'Voice channel not found' });
+    if (!R.permsOf(s, uid).connectVoice) return ack({ error: "You don't have permission to join voice channels here" });
     const cur = voiceOf.get(uid);
     if (cur && cur.channelId === channelId && cur.socketId === socket.id) return ack({ error: 'Already connected' });
     if (cur) { io.to(cur.socketId).emit('voice:kicked'); leaveVoice(uid); }

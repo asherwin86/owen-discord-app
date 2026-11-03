@@ -6,6 +6,7 @@ A simple Discord-style chat that runs from a Windows app and is used from any br
 - **Friends** - send/accept requests, see who is online, direct message.
 - **Groups** - group chats made from your friends.
 - **Servers** - create a server with channels, share the invite code, others join with it.
+- **Roles** - inside a server, click the server name, then **Manage roles** (owner, or anyone with the Manage roles permission). Roles have a name, a colour and permissions: Administrator, Manage channels, Manage roles, Kick members, Send messages, Join voice channels. `@everyone` sets what every member gets by default. Higher roles outrank lower ones: you can only edit, hand out or reorder roles below your own, only give permissions you hold yourself, and only kick or re-role members ranked below you. The owner outranks everyone. Names show in their top role's colour. Servers created before roles existed upgrade automatically (members keep chatting and joining voice).
 - **Voice channels** - every new server gets a "Lounge" voice channel; owners can add more. Click one to join, with mute, leave and a speaking highlight. Audio goes peer-to-peer (WebRTC) between browsers, up to 8 people per channel.
 - Realtime messages, unread badges, works on phones (mobile layout).
 
