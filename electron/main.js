@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { autoUpdater } = require('electron-updater');
 const { startServer } = require('../server');
+const { DEFAULT_PORT, loadSettings, saveSettings, parsePort } = require('./settings');
 
 // Where the app keeps its data (accounts, messages, certificate, logs, caches).
 // A pointer file in the default folder can move it, e.g. to another drive:
@@ -50,7 +51,9 @@ const { startServer } = require('../server');
   }
 }
 
-const PORT = 3000;
+// The port comes from settings.json in the data folder, read once the data folder is final (see whenReady).
+let settings = { port: DEFAULT_PORT };
+let changingPort = false;
 const startHidden = process.argv.includes('--hidden');
 
 let win = null;
@@ -67,6 +70,7 @@ function hostInfo() {
   return {
     version: app.getVersion(),
     port: chat ? chat.port : null,
+    wantedPort: settings.port,   // differs from `port` when that one was taken at startup
     urls: chat ? chat.urls() : [],
     secureUrls: chat ? chat.secureUrls() : [],
     local: chat ? chat.localUrl : null,
@@ -158,6 +162,37 @@ ipcMain.handle('host:autolaunch', (_e, on) => {
   app.setLoginItemSettings({ openAtLogin: !!on, args: ['--hidden'] });
   return app.getLoginItemSettings().openAtLogin;
 });
+// Changing the port restarts the server on it. A port someone typed has to be that port: if it is taken,
+// the old one comes back and the window says why, instead of the server quietly landing on another number.
+ipcMain.handle('host:set-port', async (_e, value) => {
+  const parsed = parsePort(value);
+  if (parsed.error) return { ok: false, error: parsed.error };
+  if (changingPort) return { ok: false, error: 'The port is already being changed.' };
+  const userData = app.getPath('userData');
+  if (chat && chat.port === parsed.port) {            // already listening there, only remember it
+    settings = { port: parsed.port };
+    saveSettings(userData, settings);
+    return { ok: true };
+  }
+  changingPort = true;
+  const dataDir = path.join(userData, 'data');
+  const previous = chat ? chat.port : settings.port;
+  try {
+    if (chat) { const old = chat; chat = null; await old.close(); }
+    chat = await startServer({ port: parsed.port, dataDir, strictPort: true });
+    settings = { port: parsed.port };
+    saveSettings(userData, settings);
+    return { ok: true };
+  } catch (e) {
+    chat = await startServer({ port: previous, dataDir }).catch(() => null);
+    return {
+      ok: false,
+      error: e && e.code === 'EADDRINUSE' ? `Port ${parsed.port} is already used by another program.` : `Could not use port ${parsed.port}: ${e && e.message}`,
+    };
+  } finally {
+    changingPort = false;
+  }
+});
 ipcMain.handle('host:check-update', () => {
   if (!app.isPackaged) return;
   autoUpdater.checkForUpdates().catch(() => {});
@@ -170,7 +205,8 @@ ipcMain.handle('host:install-update', () => {
 app.whenReady().then(async () => {
   if (!gotLock) return;
   try {
-    chat = await startServer({ port: PORT, dataDir: path.join(app.getPath('userData'), 'data') });
+    settings = loadSettings(app.getPath('userData'));
+    chat = await startServer({ port: settings.port, dataDir: path.join(app.getPath('userData'), 'data') });
   } catch (e) {
     require('electron').dialog.showErrorBox('LanChat Host', 'Could not start the server:\n' + e.message);
     app.quit();

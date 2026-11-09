@@ -18,6 +18,9 @@
   label.opt { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
   .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
   small { color: #949ba4; }
+  input[type=number] { width: 110px; background: #1e1f22; color: #dbdee1; border: 1px solid #404249; border-radius: 4px; padding: 7px 10px; font: inherit; }
+  input[type=number]:focus { outline: 2px solid #5865f2; border-color: transparent; }
+  #portMsg { margin-top: 8px; min-height: 1.4em; } #portMsg.ok { color: #23a559; } #portMsg.bad { color: #f23f42; }
 </style>
 </head>
 <body>
@@ -34,6 +37,17 @@
       <small>If other devices can't connect, allow LanChat Host through Windows Firewall (Private networks).</small>
       <button id="open" class="grey">Open here</button>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Port</h2>
+    <div class="row">
+      <span><input id="port" type="number" min="1024" max="65535" step="1" aria-label="Port"> <button id="savePort">Save</button></span>
+      <small>Default 3100</small>
+    </div>
+    <div id="portMsg" role="status"></div>
+    <small>Saving restarts the server for a moment. Links that use the old port stop working, so share the new ones above.
+      Another program using the port, or the secure port (3443), is refused.</small>
   </div>
 
   <div class="card">
@@ -56,6 +70,10 @@
 <script>
   const $ = (id) => document.getElementById(id);
   let info = null;
+  let portDirty = false;   // a number typed but not saved yet
+  let portNote = false;    // a message from a save is showing
+
+  function showPort(text, kind) { const m = $('portMsg'); m.textContent = text; m.className = kind || ''; }
 
   function renderUpdate(u) {
     $('upd').textContent = u.message || 'No update check yet.';
@@ -81,11 +99,32 @@
     $('auto').checked = info.autoLaunch;
     $('users').textContent = info.stats.users;
     $('online').textContent = info.stats.online;
+    // Do not overwrite a number that is being typed.
+    if (!portDirty) $('port').value = info.port || info.wantedPort;
+    if (info.port && info.port !== info.wantedPort && !portNote) {
+      showPort(`Port ${info.wantedPort} was in use at startup, so LanChat is using ${info.port}. Close what uses ${info.wantedPort}, or save another port.`, 'bad');
+    }
     fill($('urls'), info.urls.length ? info.urls : [info.local]);
     fill($('surls'), info.secureUrls.length ? info.secureUrls : ['(HTTPS unavailable)']);
     renderUpdate(info.update);
   }
 
+  $('port').oninput = () => { portDirty = true; portNote = false; showPort(''); };
+  $('port').onkeydown = (e) => { if (e.key === 'Enter') $('savePort').click(); };
+  $('savePort').onclick = async () => {
+    const button = $('savePort');
+    button.disabled = true;
+    showPort('Restarting the server...');
+    try {
+      const r = await window.host.setPort($('port').value);
+      portDirty = false;
+      portNote = true;
+      showPort(r.ok ? `Now listening on port ${$('port').value.trim()}.` : r.error, r.ok ? 'ok' : 'bad');
+    } finally {
+      button.disabled = false;
+      await load();
+    }
+  };
   $('open').onclick = () => window.host.open(info.local);
   $('auto').onchange = (e) => window.host.setAutoLaunch(e.target.checked);
   $('check').onclick = () => window.host.checkUpdate();

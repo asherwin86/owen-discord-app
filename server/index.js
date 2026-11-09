@@ -41,7 +41,9 @@ function listen(server, port, tries = 10) {
   });
 }
 
-async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir = path.join(__dirname, '..', 'public') }) {
+// strictPort: fail if the port is taken instead of moving to the next one. A port a person typed in should not
+// quietly become another number; the one picked at startup still may, so a busy port never keeps the host down.
+async function startServer({ port = 3100, httpsPort = 3443, dataDir, publicDir = path.join(__dirname, '..', 'public'), strictPort = false }) {
   const store = new Store(path.join(dataDir, 'data.json'));
   const db = store.db;
   for (const s of Object.values(db.servers)) R.ensureRoles(s);   // servers created before roles existed
@@ -579,7 +581,7 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
   });
 
   // ---------- go ----------
-  const boundPort = await listen(server, port);
+  const boundPort = await listen(server, port, strictPort ? 0 : 10);
 
   // HTTPS (needed for microphone access from other devices). Failure is not fatal.
   let httpsServer = null;
@@ -604,11 +606,20 @@ async function startServer({ port = 3000, httpsPort = 3443, dataDir, publicDir =
       users: Object.keys(db.users).length,
       online: [...online.values()].filter((n) => n > 0).length,
     }),
-    close: () => new Promise((resolve) => {
+    // Both listeners have to be closed here: io.close() only closes the server it was attached to last, which is
+    // the HTTPS one, so the plain port stayed taken until the process ended (and could not be changed in place).
+    // Closing a listener frees its port at once; connections already open are dropped and are not waited for.
+    close: () => {
       store.flush();
-      io.close(() => resolve());
-      if (httpsServer) httpsServer.close();
-    }),
+      io.disconnectSockets(true);                      // drop every client's connection
+      io.close(() => {});                              // and stop the engine
+      for (const srv of [server, httpsServer]) {
+        if (!srv) continue;
+        srv.close(() => {});
+        if (srv.closeAllConnections) srv.closeAllConnections();   // idle keep-alive connections
+      }
+      return Promise.resolve();
+    },
   };
 }
 

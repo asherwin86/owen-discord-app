@@ -25,7 +25,7 @@ npm run server     # or just the server, no Electron (data in ./data)
 npm test           # end-to-end smoke test
 ```
 
-The host window shows the addresses to open from other devices, e.g. `http://192.168.1.20:3000`.
+The host window shows the addresses to open from other devices, e.g. `http://192.168.1.20:3100`.
 Closing the window keeps the server running in the system tray; "Quit" in the tray stops it.
 
 **Windows Firewall:** the first launch asks to allow network access. Tick **Private networks**, otherwise other devices can't connect.

@@ -4,7 +4,7 @@ const path = require('path');
 const { startServer } = require('./index');
 
 startServer({
-  port: Number(process.env.PORT) || 3000,
+  port: Number(process.env.PORT) || 3100,
   dataDir: process.env.DATA_DIR || path.join(__dirname, '..', 'data'),
 }).then((s) => {
   console.log('LanChat running. Open one of:');
